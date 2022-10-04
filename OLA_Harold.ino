@@ -48,8 +48,6 @@
 #define PIH 1.5707963267948966192313216916398f
 #define FOURPI  (2.0 * TWO_PI)
 #define SIXPI   (3.0 * TWO_PI)
-#define BUFFER_SIZE 128
-#define WINDOW_LENGTH 1024
 int32_t sum;
 int idx_t = 0;
 float32_t mean;
@@ -57,7 +55,6 @@ int16_t *sp_L;
 int16_t *sp_R;
 double SAMPLE_RATE = 44100;
 float32_t audio_gain = 4.0f; 
-int shift = 2; 
 
 // this audio comes from the codec by I2S
 AudioInputI2S            i2s_in;
@@ -68,6 +65,7 @@ AudioMixer4              mixright;
 AudioPlayQueue           Q_out_L;
 AudioPlayQueue           Q_out_R;
 AudioOutputI2S           i2s_out;
+//AudioOutputUSB           i2s_out;
 
 AudioConnection          patchCord1(i2s_in, 0, Q_in_L, 0);
 AudioConnection          patchCord2(i2s_in, 1, Q_in_R, 0);
@@ -77,14 +75,21 @@ AudioConnection          patchCord4(Q_out_R, 0, mixright, 0);
 AudioConnection          patchCord9(mixleft, 0,  i2s_out, 1);
 AudioConnection          patchCord10(mixright, 0, i2s_out, 0);
 
-const int N_BLOCKS = 8; // 8 blocks of 128 samples == 1024 samples = 21.33ms
-float32_t in_buffer_L[N_BLOCKS * BUFFER_SIZE];
-float32_t in_buffer_R[N_BLOCKS * BUFFER_SIZE];
-float32_t out_buffer_L[N_BLOCKS * BUFFER_SIZE];
-float32_t out_buffer_R[N_BLOCKS * BUFFER_SIZE];
-float32_t add_buffer_L[N_BLOCKS * BUFFER_SIZE / 2];
-float32_t add_buffer_R[N_BLOCKS * BUFFER_SIZE / 2];
+int shift = 4; 
+#define BUFFER_SIZE 128
+#define WINDOW_LENGTH 1152
+const int IN_BUFFER_SIZE = 1152;
+#define HOPSIZE_4 WINDOW_LENGTH/4
+#define HOPSIZE_3 WINDOW_LENGTH/3
+const int N_BLOCKS = 9; //8; // 8 blocks of 128 samples == 1024 samples = 21.33ms
+float32_t in_buffer_L[4][IN_BUFFER_SIZE];
+float32_t in_buffer_R[4][IN_BUFFER_SIZE];
+float32_t out_buffer_L[IN_BUFFER_SIZE];
+float32_t out_buffer_R[IN_BUFFER_SIZE];
+float32_t add_buffer_L[IN_BUFFER_SIZE / 2];
+float32_t add_buffer_R[IN_BUFFER_SIZE / 2];
 float32_t window[N_BLOCKS * BUFFER_SIZE];
+int buffer_idx = 0;
 
 const float32_t n_att = 90.0; // desired stopband attenuation
 const int num_taps = 36; // can be divided by 2, 3 and 4 
@@ -96,7 +101,7 @@ float32_t DMAMEM interpolation_R_state [num_taps / 2 + N_BLOCKS * BUFFER_SIZE / 
 arm_fir_interpolate_instance_f32 interpolation_L;
 float32_t DMAMEM interpolation_L_state [num_taps / 2 + N_BLOCKS * BUFFER_SIZE / 2]; 
 float32_t DMAMEM interpolation_coeffs[num_taps];
-
+int hop0,hop1,hop2,hop3;
 
 void setup() {
   Serial.begin(115200);
@@ -124,6 +129,7 @@ void setup() {
     // Blackman-Nuttall
     //window[idx] = 0.3635819f - 0.4891775f*cosf(2.0*M_PI*(float)idx/((float)(WINDOW_LENGTH-1))) + 0.1365995*cosf(FOURPI*(float)idx/((float)(WINDOW_LENGTH-1))) - 0.0106411f*cosf(SIXPI*(float)idx/((float)(WINDOW_LENGTH-1)));  
   }
+
   // Interpolation filter
   // the interpolation filter is AFTER the upsampling, so it has to be in the target sample rate!
   calc_FIR_coeffs (interpolation_coeffs, num_taps, (float32_t)4000, n_att, 0, 0.0, SAMPLE_RATE);
@@ -157,8 +163,8 @@ void loop() {
 
         // convert to float one buffer_size
         // float_buffer samples are now standardized from > -1.0 to < 1.0
-        arm_q15_to_float (sp_L, &in_buffer_L[BUFFER_SIZE * i], BUFFER_SIZE); // convert int_buffer to float 32bit
-        arm_q15_to_float (sp_R, &in_buffer_R[BUFFER_SIZE * i], BUFFER_SIZE); // convert int_buffer to float 32bit
+        arm_q15_to_float (sp_L, &in_buffer_L[buffer_idx][BUFFER_SIZE * i], BUFFER_SIZE); // convert int_buffer to float 32bit
+        arm_q15_to_float (sp_R, &in_buffer_R[buffer_idx][BUFFER_SIZE * i], BUFFER_SIZE); // convert int_buffer to float 32bit
         Q_in_L.freeBuffer();
         Q_in_R.freeBuffer();
       }
@@ -173,89 +179,86 @@ void loop() {
 
 //             we apply the second half of the window to the first half of the input buffer
 //             works for N==2 
-
-        for (unsigned i = 0; i < WINDOW_LENGTH / 2; i++)
+        if(shift == 2)
         {
-          in_buffer_L[i] = in_buffer_L[i] * window[i + 512];
-          in_buffer_R[i] = in_buffer_R[i] * window[i + 512];
-        }
+            for (unsigned i = 0; i < WINDOW_LENGTH / 2; i++)
+            {
+              in_buffer_L[0][i] = in_buffer_L[0][i] * window[i + 512];
+              in_buffer_R[0][i] = in_buffer_R[0][i] * window[i + 512];
+            }
 //             we apply the first half of the window to the second half of the input buffer
-
-        for (unsigned i = 0; i < WINDOW_LENGTH / 2; i++)
-        {
-          in_buffer_L[i + 512] = in_buffer_L[i + 512] * window[i];
-          in_buffer_R[i + 512] = in_buffer_R[i + 512] * window[i];
+    
+            for (unsigned i = 0; i < WINDOW_LENGTH / 2; i++)
+            {
+              in_buffer_L[0][i + 512] = in_buffer_L[0][i + 512] * window[i];
+              in_buffer_R[0][i + 512] = in_buffer_R[0][i + 512] * window[i];
+            }
         }
-
-//             we apply 
-//             N==4 --> does not work
-/*
-        for (unsigned i = 0; i < WINDOW_LENGTH / 4 * 3; i++)
+        else if(shift == 3)
         {
-          in_buffer_L[i] = in_buffer_L[i] * window[i + 256];
-          in_buffer_R[i] = in_buffer_R[i] * window[i + 256];
+           for (unsigned i = 0; i < WINDOW_LENGTH; i++)
+           {
+              in_buffer_L[buffer_idx][i] = in_buffer_L[buffer_idx][i] * window[i];
+              in_buffer_R[buffer_idx][i] = in_buffer_R[buffer_idx][i] * window[i];
+           }          
         }
-        for (unsigned i = 0; i < WINDOW_LENGTH / 4 ; i++)
+        else if(shift == 4)
         {
-          in_buffer_L[i + 768] = in_buffer_L[i + 768] * window[i];
-          in_buffer_R[i + 768] = in_buffer_R[i + 768] * window[i];
-        }
-*/
-//             we apply 
-//             N==4 --> does not work
-/*
-        for (unsigned i = 0; i < WINDOW_LENGTH / 4; i++)
-        {
-          in_buffer_L[i] = in_buffer_L[i] * window[i + 768];
-          in_buffer_R[i] = in_buffer_R[i] * window[i + 768];
-        }
-        for (unsigned i = 0; i < WINDOW_LENGTH / 4 * 3; i++)
-        {
-          in_buffer_L[i + 256] = in_buffer_L[i + 256] * window[i];
-          in_buffer_R[i + 256] = in_buffer_R[i + 256] * window[i];
-        }
-*/
-//             we apply 
-//             N==4 --> does not work
-/*
-        for (unsigned i = 0; i < WINDOW_LENGTH / 2; i++)
-        {
-          in_buffer_L[i] = in_buffer_L[i] * window[i + 512];
-          in_buffer_R[i] = in_buffer_R[i] * window[i + 512];
-        }
-//             we apply the first half of the window to the second half of the input buffer
-
-        for (unsigned i = 0; i < WINDOW_LENGTH / 2; i++)
-        {
-          in_buffer_L[i + 512] = in_buffer_L[i + 512] * window[i];
-          in_buffer_R[i + 512] = in_buffer_R[i + 512] * window[i];
-        }
-*/
-//             we apply 
-//             N==4 --> does not work
-/*        for (unsigned i = 0; i < WINDOW_LENGTH; i++)
-        {
-          in_buffer_L[i] = in_buffer_L[i] * window[i];
-          in_buffer_R[i] = in_buffer_R[i] * window[i];
-        }
-*/
+           for (unsigned i = 0; i < WINDOW_LENGTH; i++)
+           {
+              in_buffer_L[buffer_idx][i] = in_buffer_L[buffer_idx][i] * window[i];
+              in_buffer_R[buffer_idx][i] = in_buffer_R[buffer_idx][i] * window[i];
+           }
+        } // end shift == 4
 
     
       /**********************************************************************************
           2 Overlap & Add 
        **********************************************************************************/
-        for (unsigned i = 0; i < WINDOW_LENGTH / 2; i++)
+        if(shift == 2)
         {
-          add_buffer_L[i] = in_buffer_L[i] + in_buffer_L[i + 512];
-          add_buffer_R[i] = in_buffer_R[i] + in_buffer_R[i + 512];
+            for (unsigned i = 0; i < WINDOW_LENGTH / 2; i++)
+            {
+              add_buffer_L[i] = in_buffer_L[0][i] + in_buffer_L[0][i + 512];
+              add_buffer_R[i] = in_buffer_R[0][i] + in_buffer_R[0][i + 512];
+            }
         }
-    // N=4 ???
-/*        for (unsigned i = 0; i < WINDOW_LENGTH / 4; i++)
-        {
-          add_buffer_L[i] = in_buffer_L[i] + in_buffer_L[i + 256] + in_buffer_L[i + 512] + in_buffer_L[i + 768];
-          add_buffer_R[i] = in_buffer_R[i] + in_buffer_R[i + 256] + in_buffer_R[i + 512] + in_buffer_R[i + 768];
+        else if(shift == 3)
+        {   // index of in_buffer    [0][x]  [1][x]  [2][x]  
+            if(buffer_idx==2)       {hop0=2, hop1=1, hop2=0;}
+            else if(buffer_idx==1)  {hop0=1, hop1=0, hop2=2;}
+            else if(buffer_idx==0)  {hop0=0, hop1=2, hop2=1;}
+            hop0=hop0*HOPSIZE_3;
+            hop1=hop1*HOPSIZE_3;
+            hop2=hop2*HOPSIZE_3;
+            for (unsigned i = 0; i < HOPSIZE_3; i++)
+            {
+                add_buffer_L[i] = in_buffer_L[0][i + hop0] + in_buffer_L[1][i + hop1] + in_buffer_L[2][i + hop2]; 
+                add_buffer_R[i] = in_buffer_R[0][i + hop0] + in_buffer_R[1][i + hop1] + in_buffer_R[2][i + hop2]; 
+            }
+
+            buffer_idx = buffer_idx + 1;  // increment
+            if (buffer_idx >=3) {buffer_idx = 0;} // flip-over           
         }
-*/
+        else if(shift == 4)
+        {   // index of in_buffer    [0][x]  [1][x]  [2][x]  [3][x]
+            if(buffer_idx == 3)     {hop0=3, hop1=2, hop2=1, hop3=0;}
+            else if(buffer_idx==2)  {hop0=2, hop1=1, hop2=0, hop3=3;}
+            else if(buffer_idx==1)  {hop0=1, hop1=0, hop2=3, hop3=2;}
+            else if(buffer_idx==0)  {hop0=0, hop1=3, hop2=2, hop3=1;}
+            hop0=hop0*HOPSIZE_4;
+            hop1=hop1*HOPSIZE_4;
+            hop2=hop2*HOPSIZE_4;
+            hop3=hop3*HOPSIZE_4;
+            for (unsigned i = 0; i < HOPSIZE_4; i++)
+            {
+                add_buffer_L[i] = in_buffer_L[0][i + hop0] + in_buffer_L[1][i + hop1] + in_buffer_L[2][i + hop2] + in_buffer_L[3][i + hop3]; 
+                add_buffer_R[i] = in_buffer_R[0][i + hop0] + in_buffer_R[1][i + hop1] + in_buffer_R[2][i + hop2] + in_buffer_R[3][i + hop3]; 
+            }
+
+            buffer_idx = buffer_idx + 1;  // increment
+            if (buffer_idx >=4) {buffer_idx = 0;} // flip-over  
+        }
 
       /**********************************************************************************
           3 Interpolate 
@@ -266,12 +269,31 @@ void loop() {
       // interpolation-in-place does not work
       // blocksize is BEFORE zero stuffing
       // recycle in_buffer
-      arm_fir_interpolate_f32(&interpolation_L, add_buffer_L, in_buffer_L, BUFFER_SIZE * N_BLOCKS / (uint32_t)(shift));
-      arm_fir_interpolate_f32(&interpolation_R, add_buffer_R, in_buffer_R, BUFFER_SIZE * N_BLOCKS / (uint32_t)(shift));
+      if(shift == 2)
+      {
+          arm_fir_interpolate_f32(&interpolation_L, add_buffer_L, in_buffer_L[0], BUFFER_SIZE * N_BLOCKS / (uint32_t)(shift));
+          arm_fir_interpolate_f32(&interpolation_R, add_buffer_R, in_buffer_R[0], BUFFER_SIZE * N_BLOCKS / (uint32_t)(shift));
+          // do some scaling / gain application after the interpolation
+          arm_scale_f32(in_buffer_L[0], audio_gain, out_buffer_L, BUFFER_SIZE * N_BLOCKS);
+          arm_scale_f32(in_buffer_R[0], audio_gain, out_buffer_R, BUFFER_SIZE * N_BLOCKS);
 
-      // do some scaling / gain application after the interpolation
-      arm_scale_f32(in_buffer_L, audio_gain, out_buffer_L, BUFFER_SIZE * N_BLOCKS);
-      arm_scale_f32(in_buffer_R, audio_gain, out_buffer_R, BUFFER_SIZE * N_BLOCKS);
+      }
+      else if(shift == 3)
+      {
+          arm_fir_interpolate_f32(&interpolation_L, add_buffer_L, in_buffer_L[buffer_idx], BUFFER_SIZE * N_BLOCKS / (uint32_t)(shift));
+          arm_fir_interpolate_f32(&interpolation_R, add_buffer_R, in_buffer_R[buffer_idx], BUFFER_SIZE * N_BLOCKS / (uint32_t)(shift));
+          // do some scaling / gain application after the interpolation
+          arm_scale_f32(in_buffer_L[buffer_idx], audio_gain, out_buffer_L, BUFFER_SIZE * N_BLOCKS);
+          arm_scale_f32(in_buffer_R[buffer_idx], audio_gain, out_buffer_R, BUFFER_SIZE * N_BLOCKS);
+      }
+      else if(shift == 4)
+      {
+          arm_fir_interpolate_f32(&interpolation_L, add_buffer_L, in_buffer_L[buffer_idx], BUFFER_SIZE * N_BLOCKS / (uint32_t)(shift));
+          arm_fir_interpolate_f32(&interpolation_R, add_buffer_R, in_buffer_R[buffer_idx], BUFFER_SIZE * N_BLOCKS / (uint32_t)(shift));
+          // do some scaling / gain application after the interpolation
+          arm_scale_f32(in_buffer_L[buffer_idx], audio_gain, out_buffer_L, BUFFER_SIZE * N_BLOCKS);
+          arm_scale_f32(in_buffer_R[buffer_idx], audio_gain, out_buffer_R, BUFFER_SIZE * N_BLOCKS);
+      }
 
       /**********************************************************************************
            
